@@ -39,9 +39,9 @@ class RvS(nn.Module):
                     nn.init.zeros_(module.bias)
 
     def forward(self, input_dict: Dict[str, torch.Tensor]) -> torch.tensor:
-        states = input_dict["seq"]
-        rtgs = input_dict["rtgs"]        
-        
+        states = input_dict["states"]
+        rtgs = input_dict["rtgs"]
+
         stacked_inputs = torch.cat([states, rtgs], dim=-1)
 
         x = self.in_fc(stacked_inputs)

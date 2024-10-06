@@ -92,13 +92,11 @@ class DecisionConvFormer(DecisionMetaformer):
         model_dim: int,
         num_layers: int,
         max_ep_len: int,
-        max_length: int,
         action_tanh: bool = True,
         dropout: float = 0.0,
         use_bias: bool = False,
     ):
         self.window_size = window_size
-        self.max_ep_len = max_ep_len
 
         super().__init__(
             state_dim=state_dim,
@@ -108,10 +106,8 @@ class DecisionConvFormer(DecisionMetaformer):
             action_tanh=action_tanh,
             dropout=dropout,
             use_bias=use_bias,
-            max_length=max_length,
+            max_ep_len=max_ep_len,
         )
-
-        self.embed_timestep = nn.Embedding(max_ep_len, model_dim)
 
     def _build_block(self) -> nn.Module:
         return ConvFormerBlock(
@@ -125,26 +121,18 @@ class DecisionConvFormer(DecisionMetaformer):
         self,
         input_dict: Dict[str, torch.Tensor],
     ) -> torch.tensor:
-        states = input_dict["seq"]
-        actions = input_dict["actions"]
-        rtgs = input_dict["rtgs"]
-        timesteps = input_dict["timesteps"]
-        
+        states = input_dict["states"]
         batch_size, seq_len = states.shape[0], states.shape[1]
 
-        time_embeddings = self.embed_timestep(timesteps)
-        state_embeddings = self.embed_state(states) + time_embeddings
-        action_embeddings = self.embed_action(actions) + time_embeddings
-        rtg_embeddings = self.embed_return(rtgs) + time_embeddings
-
-        stacked_inputs = (
-            torch.stack([rtg_embeddings, state_embeddings, action_embeddings], dim=1)
-            .permute(0, 2, 1, 3)
-            .reshape(batch_size, 3 * seq_len, self.model_dim)
+        state_embeddings, action_embeddings, rtg_embeddings = self._create_embeddings(
+            input_dict
         )
-        stacked_inputs = self.embed_ln(stacked_inputs)
+        stacked_inputs = self._stack_embeddings(
+            state_embeddings, action_embeddings, rtg_embeddings
+        )
 
-        x = self.drop(stacked_inputs)
+        x = self.embed_ln(stacked_inputs)
+        x = self.drop(x)
         for block in self.metaformer:
             x = block(x)
         x.reshape(batch_size, seq_len, 3, self.model_dim).permute(0, 2, 1, 3)

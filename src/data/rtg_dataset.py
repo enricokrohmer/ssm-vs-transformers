@@ -27,9 +27,9 @@ class RTGDataset(SequenceDataset):
             hdf5_path=hdf5_path,
             obs_keys=obs_keys,
             dataset_keys=["actions", "rewards", "dones"],
-            frame_stack=1, # We do not support frame stapcking
+            frame_stack=1,  # We do not support frame stapcking
             seq_length=seq_length,
-            pad_frame_stack=False, # We do not support frame stacking
+            pad_frame_stack=False,  # We do not support frame stacking
             pad_seq_length=pad_seq,
             get_pad_mask=pad_seq,
             goal_mode=None,
@@ -115,18 +115,18 @@ class RTGDataset(SequenceDataset):
         seq = TensorUtils.pad_sequence(
             seq, padding=(seq_begin_pad, 0), pad_same=True
         )  # We only pad at the beginning
-        
-        #Prepare mask
+
+        # Prepare mask
         pad_mask = np.array([0] * seq_begin_pad + [1] * (seq_end_idx - seq_begin_idx))
         pad_mask = pad_mask[:, None].astype(bool)
 
-        #Prepare timesteps
+        # Prepare timesteps
         end_i = min(index_in_demo + self.seq_length, demo_length)
         timesteps = np.arange(index_in_demo, end_i, dtype=np.float32)
         timesteps = TensorUtils.pad_sequence(
             timesteps, padding=(seq_begin_pad, 0), pad_same=True
-        ) # We only pad at the beginning
-        
+        )  # We only pad at the beginning
+
         return seq, pad_mask, timesteps
 
     def get_item(self, index) -> Dict[str, torch.Tensor]:
@@ -159,18 +159,18 @@ class RTGDataset(SequenceDataset):
             seq_length=self.seq_length,
             prefix="obs",
         )
-        meta["obs"] = {k.split('/')[1]: obs[k] for k in obs}
+        meta["obs"] = {k.split("/")[1]: obs[k] for k in obs}
 
         if self.hdf5_normalize_obs:
             meta["obs"] = ObsUtils.normalize_obs(
                 meta["obs"], obs_normalization_stats=self.obs_normalization_stats
             )
-            
+
         if self.get_pad_mask:
             meta["pad_mask"] = masks
 
         # Stack all oberservation modalities and convert to tensor
-        meta["seq"] = self._stack_obs(self, meta["obs"])
+        meta["states"] = self._stack_obs(self, meta["obs"])
         for key in self.dataset_keys:
             meta[key] = torch.tensor(meta[key], dtype=torch.float32)
 

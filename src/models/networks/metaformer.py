@@ -52,7 +52,7 @@ class DecisionMetaformer(nn.Module):
         action_tanh: bool = True,
         dropout: float = 0.0,
         use_bias: bool = False,
-        max_length: Optional[int] = None,
+        max_ep_len: Optional[int] = None,
     ):
         super().__init__()
         # Saving hyperparameters
@@ -62,7 +62,6 @@ class DecisionMetaformer(nn.Module):
         self.num_layers = num_layers
         self.action_tanh = action_tanh
         self.dropout = dropout
-        self.max_length = max_length
         self.use_bias = use_bias
 
         # Building the model
@@ -74,6 +73,9 @@ class DecisionMetaformer(nn.Module):
         self.embed_return = nn.Embedding(1, model_dim)
         self.embed_state = torch.nn.Linear(state_dim, model_dim)
         self.embed_action = torch.nn.Linear(act_dim, model_dim)
+        self.embed_timestep = (
+            nn.Embedding(max_ep_len, model_dim) if max_ep_len else None
+        )
         self.embed_ln = LayerNorm(model_dim, bias=use_bias)
 
         self.head = nn.Sequential(
@@ -94,8 +96,40 @@ class DecisionMetaformer(nn.Module):
     def _build_block(self) -> nn.Module:
         raise NotImplementedError
 
+    def _create_embeddings(self, input_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
+        states = self.embed_state(input_dict["states"])
+        actions = self.embed_action(input_dict["action"])
+        rtgs = self.embed_return(input_dict["rtg"])
+
+        if self.embed_timestep is not None:
+            timesteps = self.embed_timestep(input_dict["timesteps"])
+            states += timesteps
+            actions += timesteps
+            rtgs += timesteps
+
+        return states, actions, rtgs
+
+    def _stack_embeddings(self, states, actions, rtgs):
+        batch_size, seq_len = states.shape[0], states.shape[1]
+        stacked_inputs = (
+            torch.stack([rtgs, states, actions], dim=1)
+            .permute(0, 2, 1, 3)
+            .reshape(batch_size, 3 * seq_len, self.model_dim)
+        )
+
+        return stacked_inputs
+
     def forward(self, input_dict: Dict[str, torch.Tensor]) -> torch.tensor:
         raise NotImplementedError
 
-    def step(self):
-        raise NotImplementedError
+    def predict_action(self, input_dict: Dict[str, torch.Tensor]) -> torch.tensor:
+        state_embs, action_embs, rtg_embs = self._create_embeddings(input_dict)
+        stacked_inputs = self._stack_embeddings(state_embs, action_embs, rtg_embs)
+
+        x = self.embed_ln(stacked_inputs)
+        x = self.drop(x)
+        for block in self.metaformer:
+            x = block(x)
+
+        action_pred = self.head(x[:, -1]).squeeze(1)
+        return action_pred

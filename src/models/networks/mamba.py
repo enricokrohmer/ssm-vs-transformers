@@ -31,7 +31,7 @@ def segsum(x: torch.Tensor) -> torch.Tensor:
     return x_segsum
 
 
-def ssd(x, A, B, C, chunk_size, initial_states: Optional[torch.Tensor] = None):
+def ssd(x, A, B, C, chunk_size):
     """Structed State Space Duality (SSD) - the core of Mamba-2
 
     This is almost the exact same minimal SSD code from the blog post.
@@ -72,8 +72,7 @@ def ssd(x, A, B, C, chunk_size, initial_states: Optional[torch.Tensor] = None):
 
     # 3. Compute the inter-chunk SSM recurrence; produces correct SSM states at chunk boundaries
     # (middle term of factorization of off-diag blocks; A terms)
-    if initial_states is None:
-        initial_states = torch.zeros_like(states[:, :1])
+    initial_states = torch.zeros_like(states[:, :1])
     states = torch.cat([initial_states, states], dim=1)
     decay_chunk = torch.exp(
         segsum(F.pad(A_cumsum[:, :, :, -1], (1, 0)), device=x.deivce)
@@ -102,7 +101,15 @@ class MambaWeightInitParams:
 
 
 class InferenceCache:
-    pass
+    ssm_state: torch.Tensor  # Shape (batch, n_heads, head_dim, h_state_dim)
+
+    @staticmethod
+    def alloc(
+        nheads: int, headdim: int, d_state: int, batch_size: int, device: torch.device
+    ):
+        return InferenceCache(
+            torch.zeros(batch_size, nheads, headdim, d_state, device=device),
+        )
 
 
 class MambaSSM(nn.Module):
@@ -114,7 +121,6 @@ class MambaSSM(nn.Module):
         expand: int,
         use_bias: bool,
         init_params: MambaWeightInitParams,
-        learnable_init_state: bool = False,
         chunk_size: int = 16,
     ):
         super().__init__()
@@ -159,17 +165,6 @@ class MambaSSM(nn.Module):
         self.dt_bias = nn.Parameter(inv_dt)
         self.dt_bias._no_weight_decay = True
 
-        self.init_states = None
-        if learnable_init_state:
-            self.init_states = nn.Parameter(
-                torch.zeros(
-                    self.n_heads,
-                    self.head_dim,
-                    self.hi_state_dim,
-                )
-            )
-            self.init_states._no_weight_decay = True
-
     def forward(
         self, u: torch.Tensor, h: Optional[InferenceCache] = None
     ) -> Tuple[torch.Tensor, InferenceCache]:
@@ -193,7 +188,6 @@ class MambaSSM(nn.Module):
             rearrange(B, "b l n -> b l 1 n"),
             rearrange(C, "b l n -> b l 1 n"),
             self.chunk_size,
-            self.init_states,
         )
 
         state = InferenceCache(ssm_state)
@@ -205,7 +199,27 @@ class MambaSSM(nn.Module):
     def step(
         self, u: torch.Tensor, h: InferenceCache
     ) -> tuple[torch.Tensor, InferenceCache]:
-        pass
+        assert u.shape[1] == 1, "Only one token can be decoded per inference step"
+
+        xBCdt = self.in_proj(u.squeeze(1))
+        xBC, dt = torch.split(
+            xBCdt, [self.inner_dim + 2 * self.h_state_dim, self.n_heads], dim=-1
+        )
+
+        x, B, C = torch.split(
+            xBC, [self.inner_dim, self.h_state_dim, self.h_state_dim], dim=-1
+        )
+
+        A = -torch.exp(self.A_log)
+        dt = F.softplus(dt + self.dt_bias)
+        dA = torch.exp(A * dt)
+        x = rearrange(x, "b (h p) -> b h p", p=self.args.headdim)
+        dBx = torch.einsum("bh, bn, bhp -> bhpn", dt, B, x)
+        h.ssm_state.copy_(h.ssm_state * rearrange(dA, "b h -> b h 1 1") + dBx)
+        y = torch.einsum("bhpn, bn -> bhp", h.ssm_state, C)
+        y = self.out_proj(y)
+
+        return y.unsqueeze(1), h
 
 
 class MambaFormerBlock(nn.Module):
@@ -217,7 +231,6 @@ class MambaFormerBlock(nn.Module):
         expand: int,
         use_bias: bool,
         dropout: float,
-        learnable_init_state: bool,
         init_params: MambaWeightInitParams,
         chunk_size: int = 16,
     ):
@@ -229,7 +242,6 @@ class MambaFormerBlock(nn.Module):
             h_state_dim=h_state_dim,
             expand=expand,
             use_bias=use_bias,
-            learnable_init_state=learnable_init_state,
             init_params=init_params,
             chunk_size=chunk_size,
         )
@@ -238,7 +250,7 @@ class MambaFormerBlock(nn.Module):
 
     def forward(
         self, x: torch.Tensor, h: Optional[InferenceCache] = None
-    ) -> tuple[torch.Tensor, InferenceCache]:
+    ) -> Tuple[torch.Tensor, InferenceCache]:
         x, h = x + self.ssm(self.ln_1(x), h)
         x = x + self.mlp(self.ln_2(x))
         return x, h
@@ -250,7 +262,6 @@ class DecisionMambaFormer(DecisionMetaformer):
         state_dim: int,
         act_dim: int,
         num_layers: int,
-        max_length: int,
         model_dim: int,
         head_dim: int,
         h_state_dim: int,
@@ -278,8 +289,9 @@ class DecisionMambaFormer(DecisionMetaformer):
             action_tanh=action_tanh,
             dropout=dropout,
             use_bias=use_bias,
-            max_length=max_length,
         )
+
+        self.caches = [None for _ in range(num_layers)]
 
     def _build_block(self) -> nn.Module:
         return MambaFormerBlock(
@@ -298,27 +310,42 @@ class DecisionMambaFormer(DecisionMetaformer):
         self,
         input_dict: Dict[str, torch.Tensor],
     ) -> torch.tensor:
-        states = input_dict["seq"]
-        actions = input_dict["act"]
-        rtgs = input_dict["rtgs"]
-        
+        states = input_dict["states"]
         batch_size, seq_len = states.size(0), states.size(1)
 
-        state_embeddings = self.embed_state(states)
-        action_embeddings = self.embed_action(actions)
-        rtg_embeddings = self.embed_return(rtgs)
-
-        stacked_inputs = (
-            torch.stack([rtg_embeddings, state_embeddings, action_embeddings], dim=1)
-            .permute(0, 2, 1, 3)
-            .reshape(batch_size, 3 * seq_len, self.model_dim)
+        state_embeddings, action_embeddings, rtg_embeddings = self._create_embeddings(
+            input_dict
         )
-        stacked_inputs = self.embed_ln(stacked_inputs)
-        x = self.drop(stacked_inputs)
+        stacked_inputs = self._stack_embeddings(
+            state_embeddings, action_embeddings, rtg_embeddings
+        )
+
+        x = self.embed_ln(stacked_inputs)
+        x = self.drop(x)
 
         for block in self.metaformer:
             x, _ = block(x)
         x.reshape(batch_size, seq_len, 3, self.model_dim).permute(0, 2, 1, 3)
 
         action_preds = self.head(x[:, 1])
+        return action_preds
+
+    def predict_action(self, input_dict: Dict[str, torch.Tensor]) -> torch.tensor:
+        states = input_dict["states"]
+        assert states.shape[1] == 1, "Only one token can be decoded per inference step"
+
+        state_embeddings, action_embeddings, rtg_embeddings = self._create_embeddings(
+            input_dict
+        )
+        stacked_inputs = self._stack_embeddings(
+            state_embeddings, action_embeddings, rtg_embeddings
+        )
+
+        x = self.embed_ln(stacked_inputs)
+        x = self.drop(x)
+
+        for i, block in enumerate(self.metaformer):
+            x, self.caches[i] = block(x, self.caches[i])
+
+        action_preds = self.head(x)
         return action_preds

@@ -20,7 +20,7 @@ class CausalSelfAttention(nn.Module):
         n_head: int,
         dropout: float,
         use_bias: bool,
-        block_size: int,
+        context_len: int,
     ):
         super().__init__()
         assert model_dim % n_head == 0
@@ -43,8 +43,8 @@ class CausalSelfAttention(nn.Module):
 
         self.bias = self.register_buffer(
             "bias",
-            torch.tril(torch.ones(block_size, block_size)).view(
-                1, 1, block_size, block_size
+            torch.tril(torch.ones(context_len, context_len)).view(
+                1, 1, context_len, context_len
             ),
         )
 
@@ -104,14 +104,14 @@ class TransformerBlock(nn.Module):
     def __init__(
         self,
         n_head: int,
-        block_size: int,
+        context_len: int,
         model_dim: int,
         dropout: float,
         bias: bool,
     ):
         super().__init__()
         self.ln_1 = LayerNorm(model_dim, bias=bias)
-        self.attn = CausalSelfAttention(model_dim, n_head, dropout, bias, block_size)
+        self.attn = CausalSelfAttention(model_dim, n_head, dropout, bias, context_len)
         self.ln_2 = LayerNorm(model_dim, bias=bias)
         self.mlp = PositionWiseFFN(model_dim, dropout, bias=bias)
 
@@ -130,7 +130,7 @@ class DecisionTransformer(DecisionMetaformer):
         model_dim: int,
         num_layers: int,
         max_ep_len: int,
-        max_length: int,
+        context_len: int,
         action_tanh: bool = True,
         dropout: float = 0.0,
         use_bias: bool = False,
@@ -146,7 +146,7 @@ class DecisionTransformer(DecisionMetaformer):
             action_tanh=action_tanh,
             dropout=dropout,
             use_bias=use_bias,
-            max_length=max_length,
+            max_length=context_len,
         )
 
         self.embed_timestep = nn.Embedding(max_ep_len, model_dim)
@@ -154,7 +154,7 @@ class DecisionTransformer(DecisionMetaformer):
     def _build_block(self) -> TransformerBlock:
         return TransformerBlock(
             n_head=self.n_head,
-            block_size=self.max_length,
+            context_len=self.max_length,
             model_dim=self.model_dim,
             dropout=self.dropout,
             bias=self.use_bias,
@@ -173,38 +173,31 @@ class DecisionTransformer(DecisionMetaformer):
         self,
         input_dict: Dict[str, torch.Tensor],
     ) -> torch.tensor:
-        states = input_dict["seq"]
-        actions = input_dict["actions"]
-        rtgs = input_dict["rtgs"]
-        masks = input_dict.get("masks", None)
-        timesteps = input_dict["timesteps"]
-        
+        states = input_dict["states"]
         batch_size, seq_len = states.shape[0], states.shape[1]
 
+        masks = input_dict.get("masks", None)
         if masks is None:
             masks = torch.ones(
                 batch_size, seq_len, dtype=torch.float, device=states.device
             )
-
-        time_embeddings = self.embed_timestep(timesteps)
-        state_embeddings = self.embed_state(states) + time_embeddings
-        action_embeddings = self.embed_action(actions) + time_embeddings
-        rtg_embeddings = self.embed_return(rtgs) + time_embeddings
 
         stacked_masks = (
             torch.stack((masks, masks, masks), dim=1)
             .permute(0, 2, 1)
             .reshape(batch_size, 3 * seq_len)
         )
-        stacked_inputs = (
-            torch.stack([rtg_embeddings, state_embeddings, action_embeddings], dim=1)
-            .permute(0, 2, 1, 3)
-            .reshape(batch_size, 3 * seq_len, self.model_dim)
-        )
-        stacked_inputs = self.embed_ln(stacked_inputs)
 
-        x = self.drop(stacked_inputs)
-        for block in self.metaformer(x, attention_mask=stacked_masks):
+        state_embeddings, action_embeddings, rtg_embeddings = self._create_embeddings(
+            input_dict
+        )
+        stacked_inputs = self._stack_embeddings(
+            state_embeddings, action_embeddings, rtg_embeddings
+        )
+
+        x = self.embed_ln(stacked_inputs)
+        x = self.drop(x)
+        for block in self.metaformer:
             x = block(x, attention_mask=stacked_masks)
         x.reshape(batch_size, seq_len, 3, self.model_dim).permute(0, 2, 1, 3)
 
