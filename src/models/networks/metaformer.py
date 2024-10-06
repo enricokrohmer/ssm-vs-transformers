@@ -7,7 +7,7 @@ https://github.com/openai/gpt-2/blob/master/src/model.py
 https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt2/modeling_gpt2.py
 """
 
-from typing import Optional
+from typing import Optional, Dict
 
 import torch
 import torch.nn as nn
@@ -94,7 +94,7 @@ class DecisionMetaformer(nn.Module):
     def _build_block(self) -> nn.Module:
         raise NotImplementedError
 
-    def forward(self, states, actions, rtgs, timesteps, mask) -> torch.tensor:
+    def forward(self, input_dict: Dict[str, torch.Tensor]) -> torch.tensor:
         raise NotImplementedError
 
     def step(self):

@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Dict
 
 import math
 
@@ -171,12 +171,14 @@ class DecisionTransformer(DecisionMetaformer):
 
     def forward(
         self,
-        states: torch.tensor,
-        actions: torch.tensor,
-        rtgs: torch.tensor,
-        timesteps: torch.tensor,
-        masks: Optional[torch.tensor] = None,
+        input_dict: Dict[str, torch.Tensor],
     ) -> torch.tensor:
+        states = input_dict["seq"]
+        actions = input_dict["actions"]
+        rtgs = input_dict["rtgs"]
+        masks = input_dict.get("masks", None)
+        timesteps = input_dict["timesteps"]
+        
         batch_size, seq_len = states.shape[0], states.shape[1]
 
         if masks is None:

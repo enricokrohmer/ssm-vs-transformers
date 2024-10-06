@@ -1,3 +1,5 @@
+from typing import Dict
+
 import torch
 from torch import nn
 
@@ -121,12 +123,13 @@ class DecisionConvFormer(DecisionMetaformer):
 
     def forward(
         self,
-        states: torch.tensor,
-        actions: torch.tensor,
-        rtgs: torch.tensor,
-        timesteps: torch.tensor,
-        masks: torch.tensor,
+        input_dict: Dict[str, torch.Tensor],
     ) -> torch.tensor:
+        states = input_dict["seq"]
+        actions = input_dict["actions"]
+        rtgs = input_dict["rtgs"]
+        timesteps = input_dict["timesteps"]
+        
         batch_size, seq_len = states.shape[0], states.shape[1]
 
         time_embeddings = self.embed_timestep(timesteps)

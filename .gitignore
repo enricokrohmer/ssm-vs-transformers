@@ -152,3 +152,6 @@ logs
 
 # Aim logging
 .aim
+
+# MacOS
+.DS_Store

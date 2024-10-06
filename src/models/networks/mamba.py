@@ -1,4 +1,4 @@
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict
 from dataclasses import dataclass
 import math
 
@@ -296,12 +296,12 @@ class DecisionMambaFormer(DecisionMetaformer):
 
     def forward(
         self,
-        states: torch.tensor,
-        actions: torch.tensor,
-        rtgs: torch.tensor,
-        timesteps: torch.tensor,
-        masks: Optional[torch.tensor] = None,
+        input_dict: Dict[str, torch.Tensor],
     ) -> torch.tensor:
+        states = input_dict["seq"]
+        actions = input_dict["act"]
+        rtgs = input_dict["rtgs"]
+        
         batch_size, seq_len = states.size(0), states.size(1)
 
         state_embeddings = self.embed_state(states)

@@ -41,11 +41,7 @@ class SequenceModellingPolicy(LightningModule):
         self.net.init_weights()
 
     def training_step(self, batch: Dict[str, torch.tensor]) -> torch.Tensor:
-        states = batch["seq"]
-        actions = batch["actions"]
-        rtgs = batch["rtgs"]
-        timesteps = batch["timesteps"]
-        mask = batch["pad_mask"]
+        masks = batch["pad_mask"]
 
         # Update max_RTG for inference
         max_rtgs = batch["full_demonstration_return"]
@@ -61,13 +57,13 @@ class SequenceModellingPolicy(LightningModule):
         )
 
         # Compute action
-        action_target = copy.deepcopy(actions)
-        action_preds = self.net(states, actions, rtgs, timesteps, mask)
+        action_target = copy.deepcopy(batch["actions"])
+        action_preds = self.net(batch)
 
         # Compute loss
         act_dim = action_preds.shape[2]
-        action_preds = action_preds.reshape(-1, act_dim)[mask.reshape(-1).bool()]
-        action_target = action_target.reshape(-1, act_dim)[mask.reshape(-1).bool()]
+        action_preds = action_preds.reshape(-1, act_dim)[masks.reshape(-1).bool()]
+        action_target = action_target.reshape(-1, act_dim)[masks.reshape(-1).bool()]
 
         loss = self.criterion_task(action_target, action_preds)
         self.log(
