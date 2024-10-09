@@ -69,8 +69,11 @@ class SequenceModellingPolicy(LightningModule):
         )
 
         return loss
-    
-    def _predict_action(self, batch: Tuple[torch.Tensor, torch.Tensor | None]) -> torch.Tensor:
+        
+    def on_validation_batch_start(self, batch: copy.Any, batch_idx: int, dataloader_idx: int = 0) -> None:
+        self.current_timestep = 0
+        
+    def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor | None], *args, **kwargs) -> Tensor:
         states, rewards = batch
         num_envs = states.shape[1]
         context_len = self.hparams.get("context_len", 1)
@@ -106,18 +109,6 @@ class SequenceModellingPolicy(LightningModule):
         self.actions = torch.cat((self.actions[:, start_index:-1], action_pred.unsqueeze(1)), dim=1)
         
         return action_pred
-        
-    def on_validation_batch_start(self, batch: copy.Any, batch_idx: int, dataloader_idx: int = 0) -> None:
-        self.current_timestep = 0
-        
-    def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor | None], *args, **kwargs) -> Tensor:
-        return self._predict_action(batch)
-        
-    def on_test_batch_start(self, batch: copy.Any, batch_idx: int, dataloader_idx: int = 0) -> None:
-        self.current_timestep = 0
-        
-    def test_step(self, batch: Tuple[torch.Tensor, torch.Tensor | None], *args, **kwargs):
-        return self._predict_action(batch)
 
     def configure_optimizers(self) -> OptimizerLRScheduler:
         optimizer = self.hparams.optimizer(self.net.parameters())
