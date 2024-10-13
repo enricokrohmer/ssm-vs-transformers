@@ -69,45 +69,64 @@ class SequenceModellingPolicy(LightningModule):
         )
 
         return loss
-        
-    def on_validation_batch_start(self, batch: copy.Any, batch_idx: int, dataloader_idx: int = 0) -> None:
+
+    def on_validation_batch_start(
+        self, batch: copy.Any, batch_idx: int, dataloader_idx: int = 0
+    ) -> None:
         self.current_timestep = 0
-        
-    def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor | None], *args, **kwargs) -> Tensor:
+
+    def validation_step(
+        self, batch: Tuple[torch.Tensor, torch.Tensor | None], *args, **kwargs
+    ) -> Tensor:
         states, rewards = batch
         num_envs = states.shape[1]
         context_len = self.hparams.get("context_len", 1)
 
-        start_index = 0 if self._current_timestep < context_len else 1 # Offset for fixed context length
-        
+        start_index = (
+            0 if self._current_timestep < context_len else 1
+        )  # Offset for fixed context length
+
         if self._current_timestep == 0:
-            self.rtgs = self.rtgs = self.max_RTG * torch.ones(1, num_envs, device=states.device) # (1, num_envs)
-            self.states = states.unsqueeze(1) # (num_envs, 1, state_dim)
-            
+            self.rtgs = self.rtgs = self.max_RTG * torch.ones(
+                1, num_envs, device=states.device
+            )  # (1, num_envs)
+            self.states = states.unsqueeze(1)  # (num_envs, 1, state_dim)
+
             act_dim = self.net.action_dim
-            self.actions = torch.empty(num_envs, 0, act_dim, device=states.device)            
+            self.actions = torch.empty(num_envs, 0, act_dim, device=states.device)
         else:
             if rewards is None:
                 raise ValueError("Rewards must be provided after the first timestep")
-            
-            self.states = torch.cat((self.states[:, start_index:-1], states.unsqueeze(1)), dim=1)
-            self.rtgs = torch.cat([self.rtgs[:, start_index:-1], self.rtgs[:, -1] - rewards,])
-        
+
+            self.states = torch.cat(
+                (self.states[:, start_index:-1], states.unsqueeze(1)), dim=1
+            )
+            self.rtgs = torch.cat(
+                [
+                    self.rtgs[:, start_index:-1],
+                    self.rtgs[:, -1] - rewards,
+                ]
+            )
+
         start_time = max(self._current_timestep - context_len, 0)
         timesteps = torch.tensor(
-            list(range(start_time, self._current_timestep + 1)), device=states.device, dtype=states.dtype
+            list(range(start_time, self._current_timestep + 1)),
+            device=states.device,
+            dtype=states.dtype,
         ).repeat(num_envs, 1)
-        
+
         input_dict = {
             "states": self.states,
             "actions": self.actions,
             "rtgs": self.rtgs,
             "timesteps": timesteps,
         }
-        
+
         action_pred = self.net(input_dict)
-        self.actions = torch.cat((self.actions[:, start_index:-1], action_pred.unsqueeze(1)), dim=1)
-        
+        self.actions = torch.cat(
+            (self.actions[:, start_index:-1], action_pred.unsqueeze(1)), dim=1
+        )
+
         return action_pred
 
     def configure_optimizers(self) -> OptimizerLRScheduler:
